@@ -81,7 +81,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
       getClient: id => Object.hasOwn(saved.clients, id) ? saved.clients[id] : undefined,
       registerClient: async info => {
         if (Object.keys(saved.clients).length >= 500) throw new TooManyRequestsError('Limite de aplicaciones registradas.');
-        if (!info.redirect_uris.length || info.redirect_uris.length > 5 || info.redirect_uris.some(uri => {
+        if (!info.redirect_uris.length || info.redirect_uris.length > 20 || info.redirect_uris.some(uri => {
           try { const u = new URL(uri); return u.protocol !== 'https:' || !!u.username || !!u.password || !!u.hash || uri.length > 2048; } catch { return true; }
         })) throw new InvalidClientMetadataError('Las direcciones de retorno deben ser HTTPS, sin credenciales ni fragmentos.');
         if (!['none', 'client_secret_post', 'client_secret_basic'].includes(info.token_endpoint_auth_method || 'client_secret_post')) throw new InvalidClientMetadataError('Metodo de cliente no admitido.');
