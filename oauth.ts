@@ -16,7 +16,7 @@ const equal = (a: string, b: string) => timingSafeEqual(Buffer.from(hash(a)), Bu
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 type Grant = { clientId: string; family: string; expires: number; deadline: number; kind: 'access' | 'refresh'; used?: boolean };
 type Saved = { clients: Record<string, OAuthClientInformationFull>; tokens: Record<string, Grant> };
-type Pending = { clientId: string; params: AuthorizationParams; expires: number; cookieHash: string };
+type Pending = { clientId: string; params: AuthorizationParams; expires: number };
 type Code = Pending & { family: string };
 
 // Single-instance store. Encrypted at rest; an unavailable/corrupt store fails closed.
@@ -24,7 +24,8 @@ type Code = Pending & { family: string };
 export function installOAuth(app: express.Express, { key, issuer, file, now = () => Math.floor(Date.now() / 1000) }:
   { key: string; issuer: string; file: string; now?: () => number }) {
   const base = new URL(issuer);
-  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || base.pathname !== '/') throw new Error('OAuth requiere un origen HTTPS publico.');
+  const localDevelopment = base.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(base.hostname);
+  if ((!localDevelopment && base.protocol !== 'https:') || base.username || base.password || base.search || base.hash || base.pathname !== '/') throw new Error('OAuth requiere HTTPS; HTTP solo se admite en loopback para pruebas locales.');
   const resource = new URL('/mcp', base).href;
   const encryptionKey = createHash('sha256').update('aliaddo-oauth-store-v1\0' + key).digest();
   let saved: Saved = { clients: {}, tokens: {} };
@@ -82,7 +83,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
       registerClient: async info => {
         if (Object.keys(saved.clients).length >= 500) throw new TooManyRequestsError('Limite de aplicaciones registradas.');
         if (!info.redirect_uris.length || info.redirect_uris.length > 20 || info.redirect_uris.some(uri => {
-          try { const u = new URL(uri); return u.protocol !== 'https:' || !!u.username || !!u.password || !!u.hash || uri.length > 2048; } catch { return true; }
+          try { const u = new URL(uri); return (u.protocol !== 'https:' && !(localDevelopment && u.origin === base.origin)) || !!u.username || !!u.password || !!u.hash || uri.length > 2048; } catch { return true; }
         })) throw new InvalidClientMetadataError('Las direcciones de retorno deben ser HTTPS, sin credenciales ni fragmentos.');
         if (!['none', 'client_secret_post', 'client_secret_basic'].includes(info.token_endpoint_auth_method || 'client_secret_post')) throw new InvalidClientMetadataError('Metodo de cliente no admitido.');
         if (info.grant_types?.some(g => !['authorization_code', 'refresh_token'].includes(g)) || info.response_types?.some(r => r !== 'code')) throw new InvalidClientMetadataError('Solo se admite authorization_code con PKCE.');
@@ -98,13 +99,13 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
       checkResource(params.resource); checkScopes(params.scopes); sweep();
       if (!/^[A-Za-z0-9_-]{43}$/.test(params.codeChallenge)) throw new InvalidRequestError('PKCE S256 invalido.');
       if (pending.size >= 500) throw new TooManyRequestsError('Hay demasiadas autorizaciones pendientes.');
-      const cookie = random();
-      // The secure HttpOnly browser session identifies this pending request.
-      // CSRF protection requires the exact HTTPS Origin and SameSite cookie;
-      // neither request identifiers nor authorization parameters come from the form.
-      pending.set(hash(cookie), { clientId: client.client_id, params, expires: now() + 600, cookieHash: hash(cookie) });
-      res.cookie('__Host-aliaddo_oauth', cookie, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 600000 });
-      res.type('html').send(html(`<p>La aplicacion solicita permiso para <strong>consultar facturas</strong>. No podra crear ni modificar documentos.</p><p>Nombre declarado por la aplicacion: <strong>${escape(client.client_name || 'Sin nombre')}</strong>.</p><p>Volveras a: <code>${escape(params.redirectUri)}</code></p><p>Autoriza solo si acabas de iniciar esta conexion desde Gemini u otra aplicacion de confianza.</p><form method="post" action="/consent"><label>Clave del conector (MCP_ACCESS_KEY de Render)<br><input name="key" type="password" required maxlength="512" autocomplete="off"></label><p>Esta clave se verifica aqui y no se envia a la aplicacion.</p><button type="submit" name="decision" value="allow">Autorizar consulta de facturas</button><button type="submit" name="decision" value="deny" formnovalidate>Cancelar</button></form>`));
+      const requestId = random();
+      // This single-use reference is NOT an authorization credential. Every
+      // approval requires the owner's key, exact Origin and downstream PKCE.
+      // No ambient cookie authentication or hidden form fields are used.
+      pending.set(hash(requestId), { clientId: client.client_id, params, expires: now() + 600 });
+      res.setHeader('Content-Security-Policy', `default-src 'none'; form-action 'self' ${new URL(params.redirectUri).origin}; frame-ancestors 'none'; base-uri 'none'`);
+      res.type('html').send(html(`<p>La aplicacion solicita permiso para <strong>consultar facturas</strong>. No podra crear ni modificar documentos.</p><p>Nombre declarado por la aplicacion: <strong>${escape(client.client_name || 'Sin nombre')}</strong>.</p><p>Volveras a: <code>${escape(params.redirectUri)}</code></p><p>Autoriza solo si acabas de iniciar esta conexion desde Gemini u otra aplicacion de confianza.</p><form method="post" action="/consent/${requestId}"><label>Clave del conector (MCP_ACCESS_KEY de Render)<br><input name="key" type="password" required maxlength="512" autocomplete="off"></label><p>Esta clave se verifica aqui y no se envia a la aplicacion.</p><button type="submit" name="decision" value="allow">Autorizar consulta de facturas</button><button type="submit" name="decision" value="deny" formnovalidate>Cancelar</button></form>`));
     },
     challengeForAuthorizationCode: async (client, code) => getCode(client, code).params.codeChallenge,
     exchangeAuthorizationCode: async (client, raw, _verifier, redirect, requested) => {
@@ -138,16 +139,16 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'strict-origin', 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
     next();
   });
-  app.post('/consent', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+  app.post('/consent/:requestId', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
     sweep();
-    const cookie = /(?:^|;\s*)__Host-aliaddo_oauth=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '')?.[1] || '';
-    const sessionId = hash(cookie);
-    const entry = cookie ? pending.get(sessionId) : undefined;
-    if (req.headers.origin !== base.origin || !entry || entry.cookieHash !== hash(cookie)) {
-      console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : !cookie ? 'missing_browser_cookie' : !entry ? 'expired_or_missing_request' : 'browser_cookie' }));
+    const sessionId = hash(req.params.requestId);
+    const entry = pending.get(sessionId);
+    if (req.headers.origin !== base.origin || !entry) {
+      console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : 'expired_or_missing_request' }));
       return res.status(403).type('html').send(html('<p>Solicitud vencida o invalida. Vuelve a iniciar la conexion desde Gemini.</p>'));
     }
     const redirect = new URL(entry.params.redirectUri);
+    res.setHeader('Content-Security-Policy', `default-src 'none'; form-action 'self' ${redirect.origin}; frame-ancestors 'none'; base-uri 'none'`);
     if (entry.params.state !== undefined) redirect.searchParams.set('state', entry.params.state);
     if (req.body.decision === 'deny') {
       pending.delete(sessionId); redirect.searchParams.set('error', 'access_denied');
@@ -165,7 +166,6 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     const raw = random();
     codes.set(hash(raw), { ...entry, expires: now() + 120, family: random() });
     pending.delete(sessionId);
-    res.clearCookie('__Host-aliaddo_oauth', { secure: true, httpOnly: true, sameSite: 'lax', path: '/' });
     redirect.searchParams.set('code', raw);
     return res.redirect(303, redirect.href);
   });
