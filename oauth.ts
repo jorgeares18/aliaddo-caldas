@@ -49,6 +49,8 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     renameSync(temporary, file);
   };
   const pending = new Map<string, Pending>();
+  // Diagnostic labels are truncated hashes, never request IDs or credentials.
+  const instanceLabel = randomBytes(6).toString('hex');
   const codes = new Map<string, Code>();
   const attempts = new Map<string, { count: number; expires: number }>();
   const sweep = () => {
@@ -104,6 +106,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
       // approval requires the owner's key, exact Origin and downstream PKCE.
       // No ambient cookie authentication or hidden form fields are used.
       pending.set(hash(requestId), { clientId: client.client_id, params, expires: now() + 600 });
+      console.info('OAuth authorization created', JSON.stringify({ instance: instanceLabel, requestTag: hash(requestId).slice(0, 12), pendingCount: pending.size, lifetimeSeconds: 600 }));
       res.setHeader('Content-Security-Policy', `default-src 'none'; form-action 'self' ${new URL(params.redirectUri).origin}; frame-ancestors 'none'; base-uri 'none'`);
       res.type('html').send(html(`<p>La aplicacion solicita permiso para <strong>consultar facturas</strong>. No podra crear ni modificar documentos.</p><p>Nombre declarado por la aplicacion: <strong>${escape(client.client_name || 'Sin nombre')}</strong>.</p><p>Volveras a: <code>${escape(params.redirectUri)}</code></p><p>Autoriza solo si acabas de iniciar esta conexion desde Gemini u otra aplicacion de confianza.</p><form method="post" action="/consent/${requestId}"><label>Clave del conector (MCP_ACCESS_KEY de Render)<br><input name="key" type="password" required maxlength="512" autocomplete="off"></label><p>Esta clave se verifica aqui y no se envia a la aplicacion.</p><button type="submit" name="decision" value="allow">Autorizar consulta de facturas</button><button type="submit" name="decision" value="deny" formnovalidate>Cancelar</button></form>`));
     },
@@ -140,9 +143,12 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     next();
   });
   app.post('/consent/:requestId', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
-    sweep();
     const sessionId = hash(req.params.requestId);
+    const beforeSweep = pending.get(sessionId);
+    const expired = !!beforeSweep && beforeSweep.expires <= now();
+    sweep();
     const entry = pending.get(sessionId);
+    console.info('OAuth consent received', JSON.stringify({ instance: instanceLabel, requestTag: sessionId.slice(0, 12), pendingCount: pending.size, matched: !!entry, expired, originMatches: req.headers.origin === base.origin }));
     if (req.headers.origin !== base.origin || !entry) {
       console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : 'expired_or_missing_request' }));
       return res.status(403).type('html').send(html('<p>Solicitud vencida o invalida. Vuelve a iniciar la conexion desde Gemini.</p>'));
@@ -151,6 +157,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     res.setHeader('Content-Security-Policy', `default-src 'none'; form-action 'self' ${redirect.origin}; frame-ancestors 'none'; base-uri 'none'`);
     if (entry.params.state !== undefined) redirect.searchParams.set('state', entry.params.state);
     if (req.body.decision === 'deny') {
+      console.info('OAuth authorization consumed', JSON.stringify({ instance: instanceLabel, requestTag: sessionId.slice(0, 12), outcome: 'denied' }));
       pending.delete(sessionId); redirect.searchParams.set('error', 'access_denied');
       return res.redirect(303, redirect.href);
     }
@@ -166,6 +173,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     const raw = random();
     codes.set(hash(raw), { ...entry, expires: now() + 120, family: random() });
     pending.delete(sessionId);
+    console.info('OAuth authorization consumed', JSON.stringify({ instance: instanceLabel, requestTag: sessionId.slice(0, 12), outcome: 'approved' }));
     redirect.searchParams.set('code', raw);
     return res.redirect(303, redirect.href);
   });
