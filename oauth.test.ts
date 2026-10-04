@@ -100,6 +100,11 @@ test('OAuth rejects unsafe redirects, missing PKCE, excessive scope, forged cons
   const f = await fixture();
   try {
     for (const uri of ['http://other.example/', 'https://user:pass@other.example/', 'https://other.example/#fragment']) assert.equal((await f.register({ redirect_uris: [uri] })).status, 400);
+    const geminiRedirects = Array.from({ length: 6 }, (_, i) => `https://gemini.example/oauth/callback/${i}`);
+    const multiRedirect = await f.register({ redirect_uris: geminiRedirects, token_endpoint_auth_method: 'client_secret_post' });
+    assert.equal(multiRedirect.status, 201, 'Gemini registers six callbacks');
+    assert.deepEqual((await multiRedirect.json()).redirect_uris, geminiRedirects);
+    assert.equal((await f.register({ redirect_uris: Array(21).fill(callback) })).status, 400);
     const scopedRegistration = await f.register({ scope: '' });
     assert.equal(scopedRegistration.status, 201);
     const client = await scopedRegistration.json();
