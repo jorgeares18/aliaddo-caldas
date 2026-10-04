@@ -100,7 +100,10 @@ test('OAuth rejects unsafe redirects, missing PKCE, excessive scope, forged cons
   const f = await fixture();
   try {
     for (const uri of ['http://other.example/', 'https://user:pass@other.example/', 'https://other.example/#fragment']) assert.equal((await f.register({ redirect_uris: [uri] })).status, 400);
-    const client = await (await f.register()).json();
+    const scopedRegistration = await f.register({ scope: '' });
+    assert.equal(scopedRegistration.status, 201);
+    const client = await scopedRegistration.json();
+    assert.equal(client.scope, 'invoices:read');
     assert.equal((await f.authorize(client.client_id, { redirect_uri: 'https://unregistered.example/' })).response.status, 400);
     for (const override of [{ scope: 'invoices:write' }, { resource: 'https://other.example/' }, { code_challenge_method: 'plain' }]) {
       const rejected = await f.authorize(client.client_id, override);
