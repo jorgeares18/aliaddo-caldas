@@ -120,7 +120,9 @@ test('OAuth rejects unsafe redirects, missing PKCE, excessive scope, forged cons
     assert.equal(auth.html.includes('<script>bad()'), false);
     assert.match(auth.html, /&lt;script&gt;/);
     assert.match(auth.response.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
+    assert.equal(auth.response.headers.get('referrer-policy'), 'strict-origin', 'form posts preserve Origin without disclosing authorization query');
     assert.equal((await f.consent(auth, {}, { Cookie: '' })).status, 403);
+    assert.equal((await f.consent(auth, {}, { Origin: 'null' })).status, 403, 'opaque origins still rejected');
     assert.equal((await f.consent(auth, {}, { Origin: 'https://evil.example' })).status, 403);
     assert.equal((await f.consent(auth, { key: 'wrong' })).status, 403);
     const denial = await f.consent(auth, { decision: 'deny', key: '' });
