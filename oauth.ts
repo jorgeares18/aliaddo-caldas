@@ -130,14 +130,19 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     }
   };
   app.use(['/authorize', '/consent'], (_req, res, next) => {
-    res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
+    // A basic form POST under no-referrer can carry Origin: null. Keep only
+    // the origin (never the authorization query) so strict CSRF validation works.
+    res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'strict-origin', 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
     next();
   });
   app.post('/consent', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
     sweep();
     const entry = typeof req.body.request === 'string' ? pending.get(req.body.request) : undefined;
     const cookie = /(?:^|;\s*)__Host-aliaddo_oauth=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '')?.[1] || '';
-    if (req.headers.origin !== base.origin || !entry || entry.cookieHash !== hash(cookie)) return res.status(403).type('html').send(html('<p>Solicitud vencida o invalida. Vuelve a iniciar la conexion desde Gemini.</p>'));
+    if (req.headers.origin !== base.origin || !entry || entry.cookieHash !== hash(cookie)) {
+      console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : !entry ? 'expired_or_missing_request' : 'browser_cookie' }));
+      return res.status(403).type('html').send(html('<p>Solicitud vencida o invalida. Vuelve a iniciar la conexion desde Gemini.</p>'));
+    }
     const redirect = new URL(entry.params.redirectUri);
     if (entry.params.state !== undefined) redirect.searchParams.set('state', entry.params.state);
     if (req.body.decision === 'deny') {
