@@ -7,6 +7,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { InvalidGrantError, InvalidTokenError, InvalidScopeError, InvalidRequestError, InvalidClientMetadataError, TooManyRequestsError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthClientMetadataSchema } from '@modelcontextprotocol/sdk/shared/auth.js';
 
 const scope = 'invoices:read';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -85,7 +86,8 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
         })) throw new InvalidClientMetadataError('Las direcciones de retorno deben ser HTTPS, sin credenciales ni fragmentos.');
         if (!['none', 'client_secret_post', 'client_secret_basic'].includes(info.token_endpoint_auth_method || 'client_secret_post')) throw new InvalidClientMetadataError('Metodo de cliente no admitido.');
         if (info.grant_types?.some(g => !['authorization_code', 'refresh_token'].includes(g)) || info.response_types?.some(r => r !== 'code')) throw new InvalidClientMetadataError('Solo se admite authorization_code con PKCE.');
-        checkScopes(info.scope?.split(' '));
+        // Registration describes the client, not an authorization grant. Return
+        // our supported scope; requested permissions are checked at /authorize.
         const client = { ...info, client_id: random(), client_id_issued_at: now(), scope, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] };
         saved.clients[client.client_id] = client;
         persist();
@@ -157,6 +159,20 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     res.clearCookie('__Host-aliaddo_oauth', { secure: true, httpOnly: true, sameSite: 'lax', path: '/' });
     redirect.searchParams.set('code', raw);
     return res.redirect(303, redirect.href);
+  });
+  app.use('/register', express.json({ limit: '32kb' }), (req, res, next) => {
+    res.once('finish', () => {
+      const parsed = OAuthClientMetadataSchema.safeParse(req.body);
+      const method = req.body?.token_endpoint_auth_method;
+      // Never log the body, URLs, client identifiers, secrets or credentials.
+      console.info('OAuth registration', JSON.stringify({ status: res.statusCode,
+        schema: parsed.success ? 'ok' : 'invalid',
+        invalidFields: parsed.success ? [] : parsed.error.issues.map(i => i.path.filter(p => typeof p === 'string' && /^[a-z_]+$/.test(p)).join('.')),
+        authMethod: ['none', 'client_secret_post', 'client_secret_basic'].includes(method) ? method : method === undefined ? 'omitted' : 'other',
+        scope: req.body?.scope === undefined ? 'omitted' : req.body.scope === '' ? 'empty' : req.body.scope === scope ? 'supported' : 'other',
+        redirects: Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.length : 'invalid' }));
+    });
+    next();
   });
   app.use(mcpAuthRouter({ provider, issuerUrl: base, resourceServerUrl: new URL(resource), scopesSupported: [scope], resourceName: 'Aliaddo Caldas - consulta de facturas', clientRegistrationOptions: { clientSecretExpirySeconds: 0 } }));
   return requireBearerAuth({ verifier: provider, requiredScopes: [scope], expectedResource: resource, resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource/mcp', base).href });
