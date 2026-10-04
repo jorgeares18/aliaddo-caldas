@@ -35,9 +35,9 @@ async function fixture() {
   async function authorize(clientId, override = {}) {
     const response = await request('/authorize?' + new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 'original-state', resource: issuer + '/mcp', ...override }));
     const html = await response.text();
-    return { response, html, cookie: response.headers.get('set-cookie')?.split(';')[0] };
+    return { response, html, action: /action="(\/consent\/[A-Za-z0-9_-]+)"/.exec(html)?.[1] };
   }
-  const consent = (auth, extra = {}, headers = {}) => form('/consent', { decision: 'allow', key: ownerKey, ...extra }, { Origin: issuer, Cookie: auth.cookie, ...headers });
+  const consent = (auth, extra = {}, headers = {}) => form(auth.action, { decision: 'allow', key: ownerKey, ...extra }, { Origin: issuer, ...headers });
   async function grant(client) {
     const auth = await authorize(client.client_id);
     const response = await consent(auth);
@@ -121,12 +121,10 @@ test('OAuth rejects unsafe redirects, missing PKCE, excessive scope, forged cons
     assert.match(auth.html, /&lt;script&gt;/);
     assert.match(auth.response.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
     assert.equal(auth.response.headers.get('referrer-policy'), 'strict-origin', 'form posts preserve Origin without disclosing authorization query');
-    assert.equal(auth.html.includes('name="request"'), false, 'consent uses the browser session, not an auxiliary hidden field');
-    assert.match(auth.response.headers.get('set-cookie')!, /HttpOnly/);
-    assert.match(auth.response.headers.get('set-cookie')!, /Secure/);
-    assert.match(auth.response.headers.get('set-cookie')!, /SameSite=Lax/);
-    assert.equal((await f.consent(auth, {}, { Cookie: '' })).status, 403);
-    assert.equal((await f.consent(auth, { request: 'invented-id' }, { Cookie: '__Host-aliaddo_oauth=forged' })).status, 403);
+    assert.equal(auth.html.includes('name="request"'), false);
+    assert.equal(auth.response.headers.get('set-cookie'), null, 'no ambient cookie authentication');
+    assert.equal((await f.consent({ action: '/consent/invented-id' })).status, 403);
+    assert.equal((await f.consent(auth, {}, { Origin: '' })).status, 403);
     assert.equal((await f.consent(auth, {}, { Origin: 'null' })).status, 403, 'opaque origins still rejected');
     assert.equal((await f.consent(auth, {}, { Origin: 'https://evil.example' })).status, 403);
     assert.equal((await f.consent(auth, { key: 'wrong' })).status, 403);
