@@ -98,10 +98,13 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
       checkResource(params.resource); checkScopes(params.scopes); sweep();
       if (!/^[A-Za-z0-9_-]{43}$/.test(params.codeChallenge)) throw new InvalidRequestError('PKCE S256 invalido.');
       if (pending.size >= 500) throw new TooManyRequestsError('Hay demasiadas autorizaciones pendientes.');
-      const id = random(); const cookie = random();
-      pending.set(id, { clientId: client.client_id, params, expires: now() + 600, cookieHash: hash(cookie) });
+      const cookie = random();
+      // The secure HttpOnly browser session identifies this pending request.
+      // CSRF protection requires the exact HTTPS Origin and SameSite cookie;
+      // neither request identifiers nor authorization parameters come from the form.
+      pending.set(hash(cookie), { clientId: client.client_id, params, expires: now() + 600, cookieHash: hash(cookie) });
       res.cookie('__Host-aliaddo_oauth', cookie, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 600000 });
-      res.type('html').send(html(`<p>La aplicacion solicita permiso para <strong>consultar facturas</strong>. No podra crear ni modificar documentos.</p><p>Nombre declarado por la aplicacion: <strong>${escape(client.client_name || 'Sin nombre')}</strong>.</p><p>Volveras a: <code>${escape(params.redirectUri)}</code></p><p>Autoriza solo si acabas de iniciar esta conexion desde Gemini u otra aplicacion de confianza.</p><form method="post" action="/consent"><input type="hidden" name="request" value="${id}"><label>Clave del conector (MCP_ACCESS_KEY de Render)<br><input name="key" type="password" required maxlength="512" autocomplete="off"></label><p>Esta clave se verifica aqui y no se envia a la aplicacion.</p><button type="submit" name="decision" value="allow">Autorizar consulta de facturas</button><button type="submit" name="decision" value="deny" formnovalidate>Cancelar</button></form>`));
+      res.type('html').send(html(`<p>La aplicacion solicita permiso para <strong>consultar facturas</strong>. No podra crear ni modificar documentos.</p><p>Nombre declarado por la aplicacion: <strong>${escape(client.client_name || 'Sin nombre')}</strong>.</p><p>Volveras a: <code>${escape(params.redirectUri)}</code></p><p>Autoriza solo si acabas de iniciar esta conexion desde Gemini u otra aplicacion de confianza.</p><form method="post" action="/consent"><label>Clave del conector (MCP_ACCESS_KEY de Render)<br><input name="key" type="password" required maxlength="512" autocomplete="off"></label><p>Esta clave se verifica aqui y no se envia a la aplicacion.</p><button type="submit" name="decision" value="allow">Autorizar consulta de facturas</button><button type="submit" name="decision" value="deny" formnovalidate>Cancelar</button></form>`));
     },
     challengeForAuthorizationCode: async (client, code) => getCode(client, code).params.codeChallenge,
     exchangeAuthorizationCode: async (client, raw, _verifier, redirect, requested) => {
@@ -137,16 +140,17 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
   });
   app.post('/consent', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
     sweep();
-    const entry = typeof req.body.request === 'string' ? pending.get(req.body.request) : undefined;
     const cookie = /(?:^|;\s*)__Host-aliaddo_oauth=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '')?.[1] || '';
+    const sessionId = hash(cookie);
+    const entry = cookie ? pending.get(sessionId) : undefined;
     if (req.headers.origin !== base.origin || !entry || entry.cookieHash !== hash(cookie)) {
-      console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : !entry ? 'expired_or_missing_request' : 'browser_cookie' }));
+      console.info('OAuth consent rejected', JSON.stringify({ reason: req.headers.origin !== base.origin ? 'origin' : !cookie ? 'missing_browser_cookie' : !entry ? 'expired_or_missing_request' : 'browser_cookie' }));
       return res.status(403).type('html').send(html('<p>Solicitud vencida o invalida. Vuelve a iniciar la conexion desde Gemini.</p>'));
     }
     const redirect = new URL(entry.params.redirectUri);
     if (entry.params.state !== undefined) redirect.searchParams.set('state', entry.params.state);
     if (req.body.decision === 'deny') {
-      pending.delete(req.body.request); redirect.searchParams.set('error', 'access_denied');
+      pending.delete(sessionId); redirect.searchParams.set('error', 'access_denied');
       return res.redirect(303, redirect.href);
     }
     const ip = req.ip || 'unknown';
@@ -160,7 +164,7 @@ export function installOAuth(app: express.Express, { key, issuer, file, now = ()
     if (codes.size >= 500) return res.sendStatus(429);
     const raw = random();
     codes.set(hash(raw), { ...entry, expires: now() + 120, family: random() });
-    pending.delete(req.body.request);
+    pending.delete(sessionId);
     res.clearCookie('__Host-aliaddo_oauth', { secure: true, httpOnly: true, sameSite: 'lax', path: '/' });
     redirect.searchParams.set('code', raw);
     return res.redirect(303, redirect.href);
