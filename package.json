@@ -1,0 +1,13 @@
+{
+  "name": "aliaddo-caldas",
+  "version": "1.0.0",
+  "main": "server.ts",
+  "scripts": {
+    "start": "npx tsx server.ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0",
+    "tsx": "^4.7.1"
+  }
+}
