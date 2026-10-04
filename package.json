@@ -1,9 +1,9 @@
 {
   "name": "aliaddo-caldas",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.ts", "test": "node --test server.test.ts" },
+  "scripts": { "start": "node server.ts", "test": "node --test server.test.ts oauth.test.ts" },
   "engines": { "node": "24.x" },
   "dependencies": { "@modelcontextprotocol/sdk": "1.32.0", "express": "^4.21.2", "tsx": "^4.20.0", "zod": "4.6.5" }
 }
